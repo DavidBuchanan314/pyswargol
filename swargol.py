@@ -45,14 +45,16 @@ which does not hold the GIL.
 
 """
 
-FB_WIDTH, FB_HEIGHT = (3840, 2160)
+#FB_WIDTH, FB_HEIGHT = (3840, 2160)
 #FB_WIDTH, FB_HEIGHT = (3024, 1890-2)
-#FB_WIDTH, FB_HEIGHT = (1920, 1080)
+FB_WIDTH, FB_HEIGHT = (1920, 1080)
 #FB_WIDTH, FB_HEIGHT = (128, 64)
 WIDTH_PADDING = 16
 VSYNC = 0
-FRAMESKIP = 8 # 1 = no skipped frames, 2 = every other, 3 = every third, etc.
+FULLSCREEN = 0
+FRAMESKIP = 31 # 1 = no skipped frames, 2 = every other, 3 = every third, etc.
 NUM_PROCS = 8
+DRYLIFE = 1
 
 # return all remaining items in a queue
 def queue_purge(queue: Queue):
@@ -78,6 +80,7 @@ def life_thread(stopped, width, height, packed_pipe, pipe_top, pipe_bottom):
 	MASK_WRAP_RIGHT = int.from_bytes((b"\x00" * ((WIDTH - WIDTH_PADDING // 2) // 2) + b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (HEIGHT + 2), "little") << (2 * 4)
 	MASK_NOT_3 = MASK_1 * (15 ^ 3)
 	MASK_NOT_4 = MASK_1 * (15 ^ 4)
+	MASK_NOT_7 = MASK_1 * (15 ^ 7)
 	#WRAP_MASK = int.from_bytes(b"\x11" * (BIAS//8), "little") << BIAS # should that be BIAS//8???
 
 	if 1:
@@ -94,51 +97,63 @@ def life_thread(stopped, width, height, packed_pipe, pipe_top, pipe_bottom):
 	pipe_bottom.send_bytes(seed_bytes[-STRIDE//2:]) # send down our bottom row
 
 	framectr = 0
-	while not stopped.is_set():
-		"""
-		if we include ourself as a neighbor:
-		alive = (exactly 3 neighbors) or (alive and 4 neighbors)
-		"""
+	try:
+		while not stopped.is_set():
+			"""
+			if we include ourself as a neighbor:
+			alive = (exactly 3 neighbors) or (alive and 4 neighbors)
+			"""
 
-		# implement wraparound
-		# vertical wrap
-		state |= int.from_bytes(pipe_top.recv_bytes(), "little") | (int.from_bytes(pipe_bottom.recv_bytes(), "little") << (WRAPSHIFT + BIAS))
-		# horizontal wrap
-		state |= ((state & MASK_WRAP_LEFT) << (WIDTH * 4)) | ((state & MASK_WRAP_RIGHT) >> (WIDTH * 4))
+			# implement wraparound
+			# vertical wrap
+			state |= int.from_bytes(pipe_top.recv_bytes(), "little") | (int.from_bytes(pipe_bottom.recv_bytes(), "little") << (WRAPSHIFT + BIAS))
+			# horizontal wrap
+			state |= ((state & MASK_WRAP_LEFT) << (WIDTH * 4)) | ((state & MASK_WRAP_RIGHT) >> (WIDTH * 4))
 
-		# count neighbors
-		summed = state
-		summed += (summed >> 4) + (summed << 4)
-		summed += (summed >> COLSHIFT) + (summed << COLSHIFT)
+			# count neighbors
+			summed = state
+			summed += (summed >> 4) + (summed << 4)
+			summed += (summed >> COLSHIFT) + (summed << COLSHIFT)
 
-		# check if there are exactly 3 neighbors
-		has_3_neighbors = summed ^ MASK_NOT_3 # at this point, a value of all 1s means it was initially 3
-		has_3_neighbors &= has_3_neighbors >> 2 # fold in half
-		has_3_neighbors &= has_3_neighbors >> 1 # fold in half again
+			# check if there are exactly 3 neighbors
+			has_3_neighbors = summed ^ MASK_NOT_3 # at this point, a value of all 1s means it was initially 3
+			has_3_neighbors &= has_3_neighbors >> 2 # fold in half
+			has_3_neighbors &= has_3_neighbors >> 1 # fold in half again
+			
+			# check if there are exactly 4 neighbors
+			has_4_neighbors = summed ^ MASK_NOT_4 # at this point, a value of all 1s means it was initially 4
+			has_4_neighbors &= has_4_neighbors >> 2  # fold in half
+			has_4_neighbors &= has_4_neighbors >> 1  # fold in half again
+
+			if DRYLIFE:
+				# check if there are exactly 4 neighbors
+				has_7_neighbors = summed ^ MASK_NOT_7 # at this point, a value of all 1s means it was initially 7
+				has_7_neighbors &= has_7_neighbors >> 2  # fold in half
+				has_7_neighbors &= has_7_neighbors >> 1  # fold in half again
+				has_7_neighbors &= ~state
+				has_3_neighbors |= has_7_neighbors
+
+			# apply game-of-life rules
+			state &= has_4_neighbors
+			state |= has_3_neighbors
+			state &= MASK_CANVAS
+
+			packed_state = (state>>BIAS).to_bytes(STATE_BYTE_LENGTH, "little")
+			pipe_top.send_bytes(packed_state[:STRIDE//2+1])
+			pipe_bottom.send_bytes(packed_state[-(STRIDE//2+1):])
+
+			framectr += 1
+			if framectr % FRAMESKIP:
+				continue
+
+			packed_pipe.send_bytes(packed_state)
 		
-		# check if there are exactly 4 neighbors
-		has_4_neighbors = summed ^ MASK_NOT_4 # at this point, a value of all 1s means it was initially 4
-		has_4_neighbors &= has_4_neighbors >> 2  # fold in half
-		has_4_neighbors &= has_4_neighbors >> 1  # fold in half again
-
-		# apply game-of-life rules
-		state &= has_4_neighbors
-		state |= has_3_neighbors
-		state &= MASK_CANVAS
-
-		packed_state = (state>>BIAS).to_bytes(STATE_BYTE_LENGTH, "little")
-		pipe_top.send_bytes(packed_state[:STRIDE//2+1])
-		pipe_bottom.send_bytes(packed_state[-(STRIDE//2+1):])
-
-		framectr += 1
-		if framectr % FRAMESKIP:
-			continue
-
-		packed_pipe.send_bytes(packed_state)
+		print("life_thread: graceful exit")
+		packed_pipe.close()
+		# we can't close pipe_top/pipe_bottom here because another process might be waiting on it
 	
-	print("life_thread: graceful exit")
-	packed_pipe.close()
-	# we can't close pipe_top/pipe_bottom here because another process might be waiting on it
+	except KeyboardInterrupt:
+		print("SIGINT")
 
 
 SURFACE_FMT = sdl2.SDL_PIXELFORMAT_ARGB8888
@@ -178,6 +193,9 @@ def gui_thread(blitted_queues: List[Queue]):
 
 	if not window:
 		raise Exception("Failed to create SDL2 Window")
+
+	if FULLSCREEN:
+		sdl2.SDL_SetWindowFullscreen(window, sdl2.SDL_WINDOW_FULLSCREEN)
 
 	renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_ACCELERATED | (sdl2.SDL_RENDERER_PRESENTVSYNC if VSYNC else 0))
 
@@ -224,7 +242,7 @@ def gui_thread(blitted_queues: List[Queue]):
 		now = time.time()
 		fps = len(prev_times)/(now-prev_times[prev_time_i])
 		msg = f"{fps:.1f}fps ({fps*FRAMESKIP:.1f}tps)"
-		print(msg)
+		#print(msg)
 		sdl2.SDL_SetWindowTitle(window, ("pyswargol - " + msg).encode())
 		prev_times[prev_time_i] = now
 		prev_time_i = (prev_time_i + 1) % len(prev_times)
@@ -276,6 +294,11 @@ if __name__ == "__main__":
 	):
 		print("Waiting for queues to fill...")
 		time.sleep(0.01)
+	
+	# actually, .poll() isn't enough. This is too much of a headache to solve
+	# properly, so here's a load-bearing sleep.
+	# perhaps using a barrier to keep the Life threads in lock-step would help.
+	time.sleep(0.5)
 
 	stopped.set() # tell the blitter threads to stop
 
@@ -285,7 +308,7 @@ if __name__ == "__main__":
 
 	# wait for blitter threads to exit gracefully.
 	# they'll also tell their respective Life thread to stop.
-	for thread, queue in zip(blitter_threads, blitted_queues):
+	for thread in blitter_threads:
 		thread.join()
 
 	print("Stopped blitters.")
@@ -302,6 +325,7 @@ if __name__ == "__main__":
 	print("Stopped life procs.")
 
 	# clean up the remaining Pipes
+	# I think the gc will do this anyway but hey, nice to be explicit
 	for a, b in wraparound_pipes:
 		a.close()
 		b.close()
