@@ -64,6 +64,20 @@ def queue_purge(queue: Queue):
 		pass
 
 
+class DelayedKeyboardInterrupt:
+	def __enter__(self):
+		self.signal_received = False
+		self.old_handler = signal.signal(signal.SIGINT, self.handler)
+				
+	def handler(self, sig, frame):
+		self.signal_received = (sig, frame)
+
+	def __exit__(self, type, value, traceback):
+		signal.signal(signal.SIGINT, self.old_handler)
+		if self.signal_received:
+			self.old_handler(*self.signal_received)
+
+
 def life_thread(stopped, width, height, packed_pipe, pipe_top, pipe_bottom):
 	WIDTH, HEIGHT = width, height
 
@@ -203,35 +217,32 @@ def gui_thread(blitted_queues: List[Queue]):
 	prev_time_i = 0
 	running = True
 	#surface = blitted_queue.get()
-	try:
-		while running:
-			e = sdl2.SDL_Event()
-			while sdl2.SDL_PollEvent(e):
-				if e.type == sdl2.SDL_QUIT:
+	while running:
+		e = sdl2.SDL_Event()
+		while sdl2.SDL_PollEvent(e):
+			if e.type == sdl2.SDL_QUIT:
+				running = False
+				break
+			if e.type == sdl2.SDL_KEYDOWN:
+				if e.key.keysym.sym == sdl2.SDLK_ESCAPE:
 					running = False
 					break
-				if e.type == sdl2.SDL_KEYDOWN:
-					if e.key.keysym.sym == sdl2.SDLK_ESCAPE:
-						running = False
-						break
-			
-			for i, (surface_queue, texture) in enumerate(zip(blitted_queues, textures)):
-				surface = surface_queue.get()
-				sdl2.SDL_UpdateTexture(texture, None, surface.contents.pixels, surface.contents.pitch)
-				sdl2.SDL_FreeSurface(surface)
-				sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, (FB_HEIGHT//NUM_PROCS)*i, FB_WIDTH, FB_HEIGHT//NUM_PROCS))
+		
+		for i, (surface_queue, texture) in enumerate(zip(blitted_queues, textures)):
+			surface = surface_queue.get()
+			sdl2.SDL_UpdateTexture(texture, None, surface.contents.pixels, surface.contents.pitch)
+			sdl2.SDL_FreeSurface(surface)
+			sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, (FB_HEIGHT//NUM_PROCS)*i, FB_WIDTH, FB_HEIGHT//NUM_PROCS))
 
-			sdl2.SDL_RenderPresent(renderer)
+		sdl2.SDL_RenderPresent(renderer)
 
-			now = time.time()
-			fps = len(prev_times)/(now-prev_times[prev_time_i])
-			msg = f"{fps:.1f}fps ({fps*FRAMESKIP:.1f}tps)"
-			print(msg)
-			sdl2.SDL_SetWindowTitle(window, ("pyswargol - " + msg).encode())
-			prev_times[prev_time_i] = now
-			prev_time_i = (prev_time_i + 1) % len(prev_times)
-	except KeyboardInterrupt:
-		pass
+		now = time.time()
+		fps = len(prev_times)/(now-prev_times[prev_time_i])
+		msg = f"{fps:.1f}fps ({fps*FRAMESKIP:.1f}tps)"
+		print(msg)
+		sdl2.SDL_SetWindowTitle(window, ("pyswargol - " + msg).encode())
+		prev_times[prev_time_i] = now
+		prev_time_i = (prev_time_i + 1) % len(prev_times)
 
 	sdl2.SDL_DestroyTexture(texture)
 	sdl2.SDL_DestroyRenderer(renderer)
@@ -240,7 +251,6 @@ def gui_thread(blitted_queues: List[Queue]):
 
 
 if __name__ == "__main__":
-	#packed_queue = Queue(4)
 	stopped = Event()
 	life_stopped = [Event() for _ in range(NUM_PROCS)]
 
@@ -264,7 +274,12 @@ if __name__ == "__main__":
 	for thread in blitter_threads:
 		thread.start()
 
-	gui_thread(blitted_queues)
+	try:
+		gui_thread(blitted_queues)
+	except KeyboardInterrupt:
+		print("Looks like you pressed Ctrl+C!")
+		print("For a more graceful exit, hit Esc or close the SDL window.")
+		os._exit(-1)
 
 	# The shutdown process is surprisingly fiddly to get right, without deadlocks
 	print("Shutting down...")
