@@ -1,9 +1,10 @@
 import sdl2
 import os
 import time
+import signal
 from queue import Queue, Empty
-from threading import Thread, Event
-from multiprocessing import Pipe, Process
+from threading import Thread
+from multiprocessing import Pipe, Process, Event
 from typing import List
 
 """
@@ -54,15 +55,16 @@ VSYNC = 0
 FRAMESKIP = 8 # 1 = no skipped frames, 2 = every other, 3 = every third, etc.
 NUM_PROCS = 8
 
-
-def drain_queue(queue: Queue):
+# return all remaining items in a queue
+def queue_purge(queue: Queue):
 	try:
 		while True:
-			queue.get_nowait()
+			yield queue.get_nowait()
 	except Empty:
 		pass
 
-def life_thread(stopped: Event, width, height, packed_pipe, pipe_top, pipe_bottom):
+
+def life_thread(stopped, width, height, packed_pipe, pipe_top, pipe_bottom):
 	WIDTH, HEIGHT = width, height
 
 	STRIDE = WIDTH + WIDTH_PADDING
@@ -133,16 +135,17 @@ def life_thread(stopped: Event, width, height, packed_pipe, pipe_top, pipe_botto
 		if framectr % FRAMESKIP:
 			continue
 
-		try:
-			packed_pipe.send_bytes(packed_state)
-		except BrokenPipeError:
-			return # happens during program exit
+		packed_pipe.send_bytes(packed_state)
+	
+	print("life_thread: graceful exit")
+	packed_pipe.close()
+	# we can't close pipe_top/pipe_bottom here because another process might be waiting on it
 
 
 SURFACE_FMT = sdl2.SDL_PIXELFORMAT_ARGB8888
 
 
-def blit_thread(stopped: Event, packed_queue, blitted_queue: Queue):
+def blit_thread(stopped: Event, life_stopped: Event, packed_queue, blitted_queue: Queue):
 	while not stopped.is_set():
 		packed_frame = packed_queue.recv_bytes() # this needs to stay in scope until SDL_ConvertSurfaceFormat is complete!
 		surface = sdl2.SDL_CreateRGBSurfaceWithFormatFrom(
@@ -156,6 +159,11 @@ def blit_thread(stopped: Event, packed_queue, blitted_queue: Queue):
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(255, 255, 255, 255), 1, 1)
 		blitted_queue.put(sdl2.SDL_ConvertSurfaceFormat(surface, SURFACE_FMT, 0))
 		sdl2.SDL_FreeSurface(surface)
+	
+	print("blit_thread: graceful exit")
+	life_stopped.set() # stop our corresponding life process
+	packed_queue.recv_bytes() # do a final read to un-block the writer
+	packed_queue.close() # close our end of the Pipe
 
 
 def gui_thread(blitted_queues: List[Queue]):
@@ -212,12 +220,14 @@ def gui_thread(blitted_queues: List[Queue]):
 				sdl2.SDL_UpdateTexture(texture, None, surface.contents.pixels, surface.contents.pitch)
 				sdl2.SDL_FreeSurface(surface)
 				sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, (FB_HEIGHT//NUM_PROCS)*i, FB_WIDTH, FB_HEIGHT//NUM_PROCS))
-			
+
 			sdl2.SDL_RenderPresent(renderer)
 
 			now = time.time()
 			fps = len(prev_times)/(now-prev_times[prev_time_i])
-			print(f"{fps:.1f}fps ({fps*FRAMESKIP:.1f}tps)")
+			msg = f"{fps:.1f}fps ({fps*FRAMESKIP:.1f}tps)"
+			print(msg)
+			sdl2.SDL_SetWindowTitle(window, ("pyswargol - " + msg).encode())
 			prev_times[prev_time_i] = now
 			prev_time_i = (prev_time_i + 1) % len(prev_times)
 	except KeyboardInterrupt:
@@ -232,6 +242,7 @@ def gui_thread(blitted_queues: List[Queue]):
 if __name__ == "__main__":
 	#packed_queue = Queue(4)
 	stopped = Event()
+	life_stopped = [Event() for _ in range(NUM_PROCS)]
 
 	assert((FB_HEIGHT % NUM_PROCS) == 0)
 
@@ -239,15 +250,15 @@ if __name__ == "__main__":
 
 	wraparound_pipes = [Pipe() for _ in range(NUM_PROCS)]
 	packed_result_pipes = [Pipe(duplex=False) for _ in range(NUM_PROCS)]
-	life_threads = [
-		Process(target=life_thread, args=[stopped, FB_WIDTH, FB_HEIGHT // NUM_PROCS, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%NUM_PROCS][1]])
+	life_procs = [
+		Process(target=life_thread, args=[life_stopped[i], FB_WIDTH, FB_HEIGHT // NUM_PROCS, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%NUM_PROCS][1]])
 		for i in range(NUM_PROCS)
 	]
-	for thread in life_threads:
-		thread.start()
+	for proc in life_procs:
+		proc.start()
 
 	blitter_threads = [
-		Thread(target=blit_thread, args=[stopped, packed_result_pipes[i][0], blitted_queues[i]])
+		Thread(target=blit_thread, args=[stopped, life_stopped[i], packed_result_pipes[i][0], blitted_queues[i]])
 		for i in range(NUM_PROCS)
 	]
 	for thread in blitter_threads:
@@ -255,14 +266,44 @@ if __name__ == "__main__":
 
 	gui_thread(blitted_queues)
 
-	print("Shutting down threads...")
+	# The shutdown process is surprisingly fiddly to get right, without deadlocks
+	print("Shutting down...")
 
-	#for a, b in packed_result_pipes:
-	#	#a.close()
-	#	b.close()
-	#stopped.set()
-	#drain_queue(blitted_queue)
-	#queue_reader.close()
-	#drain_queue(packed_queue)
-	#blitter.join()
-	#life.join()
+	# wait for all queues to fill up, so we're in a deterministic state for cleanup
+	while not (
+		all(q.full() for q in blitted_queues) and
+		all(a.poll() for a, _ in packed_result_pipes)
+	):
+		print("Waiting for queues to fill...")
+		time.sleep(0.01)
+
+	stopped.set() # tell the blitter threads to stop
+
+	# unblock the blitters so they can "notice" the stop event
+	for queue in blitted_queues:
+		sdl2.SDL_FreeSurface(queue.get())
+
+	# wait for blitter threads to exit gracefully.
+	# they'll also tell their respective Life thread to stop.
+	for thread, queue in zip(blitter_threads, blitted_queues):
+		thread.join()
+
+	print("Stopped blitters.")
+
+	# final pass queue purge
+	for queue in blitted_queues:
+		for surface in queue_purge(queue):
+			sdl2.SDL_FreeSurface(surface)
+
+	# wait for the processes to exit
+	for proc in life_procs:
+		proc.join()
+
+	print("Stopped life procs.")
+
+	# clean up the remaining Pipes
+	for a, b in wraparound_pipes:
+		a.close()
+		b.close()
+
+	print("Bye!")
