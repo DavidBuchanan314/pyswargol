@@ -1,7 +1,6 @@
 import sdl2
 import os
 import time
-import signal
 from queue import Queue, Empty
 from threading import Thread
 from multiprocessing import Pipe, Process, Event
@@ -62,20 +61,6 @@ def queue_purge(queue: Queue):
 			yield queue.get_nowait()
 	except Empty:
 		pass
-
-
-class DelayedKeyboardInterrupt:
-	def __enter__(self):
-		self.signal_received = False
-		self.old_handler = signal.signal(signal.SIGINT, self.handler)
-				
-	def handler(self, sig, frame):
-		self.signal_received = (sig, frame)
-
-	def __exit__(self, type, value, traceback):
-		signal.signal(signal.SIGINT, self.old_handler)
-		if self.signal_received:
-			self.old_handler(*self.signal_received)
 
 
 def life_thread(stopped, width, height, packed_pipe, pipe_top, pipe_bottom):
