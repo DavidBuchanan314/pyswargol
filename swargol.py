@@ -40,36 +40,49 @@ Each Life thread lives in its own process, to avoid the GIL. They
 talk to each other (for overlap/wraparound), and to the Blitter threads (to
 report their results), using Pipes.
 
-Everything else happens within one process, so the Blitters can talk to the
+Everything else happens in the main process, so the Blitters can talk to the
 main thread using standard Queues - the hard work here is done inside SDL2,
-which does not hold the GIL.
+which does not hold the GIL (meaning we can use multithreading, as opposed
+to multiprocessing).
 
 """
 
+# I prefer the way scaling works by default on x11, and can't be bothered to fix it under wayland
+os.environ["SDL_VIDEODRIVER"] = "x11"
+
 SURFACE_FMT = sdl2.SDL_PIXELFORMAT_ARGB8888
 
+# at time of writing, SDL2 blits INDEX4LSB surfaces as if they were actually INDEX4MSB
+INDEX4LSB_WORKAROUND = True
+WIDTH_PADDING = 16
 
-@dataclass
+
+@dataclass(kw_only=True)
 class LifeConfig:
-	fb_width: int
-	fb_height: int
-	width_padding: int
-	vsync: bool
-	fullscreen: bool
-	drylife: bool # whether to use the non-standard "drylife" algorithm.
-	frameskip: int # only render 1-in-n frames to the screen
-	num_procs: int # degree of parallelism
+	"""
+	Render Conway's Game of Life, unreasonably quickly.
+
+	:param fb_width: framebuffer width
+	:param fb_height: framebuffer height
+	:param vsync: enable vsync
+	:param fullscreen: enable fullscreen
+	:param drylife: use the non-standard "drylife" algorithm
+	:param frameskip: only render 1-in-n frames to the screen
+	:param num_procs: degree of parallelism (NB: number of actual threads will be 2n+1)
+	""" # this docstring is used by clize
+
+	fb_width:      int = 1280
+	fb_height:     int = 720
+	vsync:        bool = True
+	fullscreen:   bool = False
+	drylife:      bool = True
+	frameskip:     int = 1
+	num_procs:    int  = 8
 
 #cfg.fb_width, cfg.fb_height = (3840, 2160)
 #cfg.fb_width, cfg.fb_height = (3024, 1890-2-64)
 #cfg.fb_width, cfg.fb_height = (1920, 1080)
 #cfg.fb_width, cfg.fb_height = (128, 64)
-#cfg.width_padding = 16
-#VSYNC = 1
-#cfg.fullscreen = 0
-#cfg.frameskip = 1 # 1 = no skipped frames, 2 = every other, 3 = every third, etc.
-#cfg.num_procs = 8
-#cfg.drylife = 1
 
 # return all remaining items in a queue
 def queue_purge(queue: Queue):
@@ -83,20 +96,19 @@ def queue_purge(queue: Queue):
 def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_bottom):
 	WIDTH, HEIGHT = width, height
 
-	STRIDE = WIDTH + cfg.width_padding
+	STRIDE = WIDTH + WIDTH_PADDING
 	STATE_BYTE_LENGTH = (STRIDE * HEIGHT) // 2
 	COLSHIFT = STRIDE * 4
 	WRAPSHIFT = STRIDE * HEIGHT * 4
 	BIAS = (STRIDE + 2) * 4
 
 	MASK_1 = int.from_bytes(b"\x11" * STATE_BYTE_LENGTH, "little") << BIAS
-	MASK_CANVAS = int.from_bytes((b"\x11" * (WIDTH // 2) + b"\x00" * (cfg.width_padding // 2)) * HEIGHT, "little") << BIAS
-	MASK_WRAP_LEFT = int.from_bytes((b"\x11" * ((cfg.width_padding // 2) // 2) + b"\x00" * ((WIDTH - cfg.width_padding // 2) // 2) + b"\x00" * (cfg.width_padding // 2)) * (HEIGHT + 2), "little") << (2 * 4)
-	MASK_WRAP_RIGHT = int.from_bytes((b"\x00" * ((WIDTH - cfg.width_padding // 2) // 2) + b"\x11" * ((cfg.width_padding // 2) // 2) + b"\x00" * (cfg.width_padding // 2)) * (HEIGHT + 2), "little") << (2 * 4)
+	MASK_CANVAS = int.from_bytes((b"\x11" * (WIDTH // 2) + b"\x00" * (WIDTH_PADDING // 2)) * HEIGHT, "little") << BIAS
+	MASK_WRAP_LEFT = int.from_bytes((b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * ((WIDTH - WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (HEIGHT + 2), "little") << (2 * 4)
+	MASK_WRAP_RIGHT = int.from_bytes((b"\x00" * ((WIDTH - WIDTH_PADDING // 2) // 2) + b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (HEIGHT + 2), "little") << (2 * 4)
 	MASK_NOT_3 = MASK_1 * (15 ^ 3)
 	MASK_NOT_4 = MASK_1 * (15 ^ 4)
 	MASK_NOT_7 = MASK_1 * (15 ^ 7)
-	#WRAP_MASK = int.from_bytes(b"\x11" * (BIAS//8), "little") << BIAS # should that be BIAS//8???
 
 	if 1:
 		seed_bytes = os.urandom(STATE_BYTE_LENGTH)
@@ -164,7 +176,7 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 			if framectr % cfg.frameskip:
 				continue
 
-			packed_pipe.send_bytes(packed_state)
+			packed_pipe.send_bytes(packed_state[-WIDTH_PADDING//2::-1] if INDEX4LSB_WORKAROUND else packed_state)
 
 	except KeyboardInterrupt:
 		print("life_thread SIGINT")
@@ -172,15 +184,15 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 			packed_pipe.send_bytes(bytes(STATE_BYTE_LENGTH)) # unblock any readers, until we get killed
 
 
-def blit_thread(cfg: LifeConfig, i, stopped: Event, packed_queue, blitted_queue: Queue):
+def blit_thread(cfg: LifeConfig, i: int, section_height :int, stopped: Event, packed_queue, blitted_queue: Queue):
 	while not stopped.is_set():
 		packed_frame = packed_queue.recv_bytes() # this needs to stay in scope until SDL_ConvertSurfaceFormat is complete!
 		surface = sdl2.SDL_CreateRGBSurfaceWithFormatFrom(
 			packed_frame,
-			cfg.fb_width, cfg.fb_height // cfg.num_procs, # XXX: use config
-			4, # depth
-			(cfg.fb_width + cfg.width_padding) // 2, # pitch
-			sdl2.SDL_PIXELFORMAT_INDEX4LSB
+			cfg.fb_width, section_height,
+			4, # bit-depth
+			(cfg.fb_width + WIDTH_PADDING) // 2, # pitch
+			sdl2.SDL_PIXELFORMAT_INDEX4MSB if INDEX4LSB_WORKAROUND else sdl2.SDL_PIXELFORMAT_INDEX4LSB
 		)
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(40, 40, 40, 255), 0, 1)
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(255, 255, 255, 255), 1, 1)
@@ -192,10 +204,7 @@ def blit_thread(cfg: LifeConfig, i, stopped: Event, packed_queue, blitted_queue:
 	packed_queue.close() # close our end of the Pipe
 
 
-def gui_thread(cfg: LifeConfig, blitted_queues: List[Queue]):
-	if sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO) < 0:
-		raise Exception("Failed to init SDL2")
-
+def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List[Queue]):
 	window = sdl2.SDL_CreateWindow(
 		b"pysdl2 framebuffer test",
 		sdl2.SDL_WINDOWPOS_UNDEFINED, sdl2.SDL_WINDOWPOS_UNDEFINED,
@@ -206,21 +215,21 @@ def gui_thread(cfg: LifeConfig, blitted_queues: List[Queue]):
 	if not window:
 		raise Exception("Failed to create SDL2 Window")
 
-	if cfg.fullscreen:
-		sdl2.SDL_SetWindowFullscreen(window, sdl2.SDL_WINDOW_FULLSCREEN)
-
 	renderer = sdl2.SDL_CreateRenderer(window, -1, sdl2.SDL_RENDERER_ACCELERATED | (sdl2.SDL_RENDERER_PRESENTVSYNC if cfg.vsync else 0))
 
 	if not renderer:
 		raise Exception("Failed to create SDL2 Renderer")
 
+	if cfg.fullscreen:
+		sdl2.SDL_SetWindowFullscreen(window, sdl2.SDL_WINDOW_FULLSCREEN)
+
 	textures = []
-	for _ in range(cfg.num_procs):
+	for h in section_heights:
 		texture = sdl2.SDL_CreateTexture(
 			renderer,
 			SURFACE_FMT,
 			sdl2.SDL_TEXTUREACCESS_STREAMING,
-			cfg.fb_width, cfg.fb_height // cfg.num_procs
+			cfg.fb_width, h
 		)
 
 		if not texture:
@@ -228,10 +237,13 @@ def gui_thread(cfg: LifeConfig, blitted_queues: List[Queue]):
 		
 		textures.append(texture)
 
+	if INDEX4LSB_WORKAROUND:
+		blitted_queues.reverse()
+		textures.reverse()
+
 	prev_times = [time.time()]*200
 	prev_time_i = 0
 	running = True
-	#surface = blitted_queue.get()
 	while running:
 		e = sdl2.SDL_Event()
 		while sdl2.SDL_PollEvent(e):
@@ -243,11 +255,14 @@ def gui_thread(cfg: LifeConfig, blitted_queues: List[Queue]):
 					running = False
 					break
 		
-		for i, (surface_queue, texture) in enumerate(zip(blitted_queues, textures)):
+		y = 0
+		for surface_queue, texture in zip(blitted_queues, textures):
 			surface = surface_queue.get()
 			sdl2.SDL_UpdateTexture(texture, None, surface.contents.pixels, surface.contents.pitch)
+			h = surface.contents.h
 			sdl2.SDL_FreeSurface(surface)
-			sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, (cfg.fb_height//cfg.num_procs)*i, cfg.fb_width, cfg.fb_height//cfg.num_procs))
+			sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, y, cfg.fb_width, h))
+			y += h
 
 		sdl2.SDL_RenderPresent(renderer)
 
@@ -266,30 +281,43 @@ def gui_thread(cfg: LifeConfig, blitted_queues: List[Queue]):
 
 
 def main(cfg: LifeConfig):
+	# init sdl2 here so we can query screen size for fullscreen mode
+	if sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO) < 0:
+		raise Exception("Failed to init SDL2")
+	
+	if cfg.fullscreen:
+		dm = sdl2.SDL_DisplayMode()
+		sdl2.SDL_GetDesktopDisplayMode(0, dm)
+		print(f"Overriding fb size to match fullscreen resolution: {dm.w}x{dm.h}")
+		cfg.fb_width, cfg.fb_height = dm.w, dm.h
+
 	stopped = Event()
 
-	assert((cfg.fb_height % cfg.num_procs) == 0)
+	# vertically split the framebuffer into close-to-equal sized chunks
+	baseheight, rem = divmod(cfg.fb_height, cfg.num_procs)
+	section_heights = [baseheight] * (cfg.num_procs - rem) + [baseheight+1] * rem
+	assert(sum(section_heights) == cfg.fb_height)
 
 	blitted_queues = [Queue(1) for _ in range(cfg.num_procs)]
 
 	wraparound_pipes = [Pipe() for _ in range(cfg.num_procs)]
 	packed_result_pipes = [Pipe(duplex=False) for _ in range(cfg.num_procs)]
 	life_procs = [
-		Process(target=life_thread, args=[cfg, i, cfg.fb_width, cfg.fb_height // cfg.num_procs, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
-		for i in range(cfg.num_procs)
+		Process(target=life_thread, args=[cfg, i, cfg.fb_width, h, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
+		for i, h in enumerate(section_heights)
 	]
 	for proc in life_procs:
 		proc.start()
 
 	blitter_threads = [
-		Thread(target=blit_thread, args=[cfg, i, stopped, packed_result_pipes[i][0], blitted_queues[i]])
-		for i in range(cfg.num_procs)
+		Thread(target=blit_thread, args=[cfg, i, h, stopped, packed_result_pipes[i][0], blitted_queues[i]])
+		for i, h in enumerate(section_heights)
 	]
 	for thread in blitter_threads:
 		thread.start()
 
 	try:
-		gui_thread(cfg, blitted_queues)
+		gui_thread(cfg, section_heights, blitted_queues)
 	except KeyboardInterrupt:
 		print("Looks like you pressed Ctrl+C!")
 
@@ -331,14 +359,9 @@ def main(cfg: LifeConfig):
 
 
 if __name__ == "__main__":
-	cfg = LifeConfig(
-		fb_width=1920,
-		fb_height=1080,
-		width_padding=16,
-		vsync=True,
-		fullscreen=False,
-		drylife=True,
-		frameskip=1,
-		num_procs=8
-	)
+	from dataclass_argparser import parse_args_for_dataclass_or_exit
+
+	cfg = parse_args_for_dataclass_or_exit(LifeConfig)
+
+	print("Config:", cfg)
 	main(cfg)
