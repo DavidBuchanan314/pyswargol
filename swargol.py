@@ -55,12 +55,13 @@ SURFACE_FMT = sdl2.SDL_PIXELFORMAT_ARGB8888
 # at time of writing, SDL2 blits INDEX4LSB surfaces as if they were actually INDEX4MSB
 INDEX4LSB_WORKAROUND = True
 WIDTH_PADDING = 16
+GLIDER_TEST = False
 
 
 @dataclass(kw_only=True)
 class LifeConfig:
 	"""
-	Render Conway's Game of Life, unreasonably quickly.
+	Render Conway's Game of Life via SDL2, unreasonably quickly.
 
 	:param fb_width: framebuffer width
 	:param fb_height: framebuffer height
@@ -110,7 +111,7 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 	MASK_NOT_4 = MASK_1 * (15 ^ 4)
 	MASK_NOT_7 = MASK_1 * (15 ^ 7)
 
-	if 1:
+	if not GLIDER_TEST:
 		seed_bytes = os.urandom(STATE_BYTE_LENGTH)
 	else:
 		# glider test
@@ -222,6 +223,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 
 	if cfg.fullscreen:
 		sdl2.SDL_SetWindowFullscreen(window, sdl2.SDL_WINDOW_FULLSCREEN)
+		sdl2.SDL_ShowCursor(sdl2.SDL_DISABLE) # hide cursor
 
 	textures = []
 	for h in section_heights:
