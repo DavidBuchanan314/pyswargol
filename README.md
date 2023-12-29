@@ -18,3 +18,5 @@ Options:
 Other actions:
   -h, --help        Show the help
 ```
+
+![image](https://github.com/DavidBuchanan314/pyswargol/assets/13520633/217eaf38-d8b6-43ef-a37a-98a229dcae31)
