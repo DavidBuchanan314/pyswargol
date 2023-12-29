@@ -93,18 +93,16 @@ def queue_purge(queue: Queue):
 
 
 def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_bottom):
-	WIDTH, HEIGHT = width, height
-
-	STRIDE = WIDTH + WIDTH_PADDING
-	STATE_BYTE_LENGTH = (STRIDE * HEIGHT) // 2
+	STRIDE = width + WIDTH_PADDING
+	STATE_BYTE_LENGTH = (STRIDE * height) // 2
 	COLSHIFT = STRIDE * 4
-	WRAPSHIFT = STRIDE * HEIGHT * 4
+	WRAPSHIFT = STRIDE * height * 4
 	BIAS = (STRIDE + 2) * 4
 
 	MASK_1 = int.from_bytes(b"\x11" * STATE_BYTE_LENGTH, "little") << BIAS
-	MASK_CANVAS = int.from_bytes((b"\x11" * (WIDTH // 2) + b"\x00" * (WIDTH_PADDING // 2)) * HEIGHT, "little") << BIAS
-	MASK_WRAP_LEFT = int.from_bytes((b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * ((WIDTH - WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (HEIGHT + 2), "little") << (2 * 4)
-	MASK_WRAP_RIGHT = int.from_bytes((b"\x00" * ((WIDTH - WIDTH_PADDING // 2) // 2) + b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (HEIGHT + 2), "little") << (2 * 4)
+	MASK_CANVAS = int.from_bytes((b"\x11" * (width // 2) + b"\x00" * (WIDTH_PADDING // 2)) * height, "little") << BIAS
+	MASK_WRAP_LEFT = int.from_bytes((b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * ((width - WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (height + 2), "little") << (2 * 4)
+	MASK_WRAP_RIGHT = int.from_bytes((b"\x00" * ((width - WIDTH_PADDING // 2) // 2) + b"\x11" * ((WIDTH_PADDING // 2) // 2) + b"\x00" * (WIDTH_PADDING // 2)) * (height + 2), "little") << (2 * 4)
 	MASK_NOT_3 = MASK_1 * (15 ^ 3)
 	MASK_NOT_4 = MASK_1 * (15 ^ 4)
 	MASK_NOT_7 = MASK_1 * (15 ^ 7)
@@ -135,7 +133,7 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 			# vertical wrap
 			state |= int.from_bytes(pipe_top.recv_bytes(), "little") | (int.from_bytes(pipe_bottom.recv_bytes(), "little") << (WRAPSHIFT + BIAS))
 			# horizontal wrap
-			state |= ((state & MASK_WRAP_LEFT) << (WIDTH * 4)) | ((state & MASK_WRAP_RIGHT) >> (WIDTH * 4))
+			state |= ((state & MASK_WRAP_LEFT) << (width * 4)) | ((state & MASK_WRAP_RIGHT) >> (width * 4))
 
 			# count neighbors
 			summed = state
