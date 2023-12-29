@@ -53,6 +53,8 @@ os.environ["SDL_VIDEODRIVER"] = "x11"
 SURFACE_FMT = sdl2.SDL_PIXELFORMAT_ARGB8888
 
 # at time of writing, SDL2 blits INDEX4LSB surfaces as if they were actually INDEX4MSB
+# Setting this to False should give a small perf boost, but will render incorrectly on
+# not-bleeding-edge SDL2 builds
 INDEX4LSB_WORKAROUND = True
 WIDTH_PADDING = 16
 GLIDER_TEST = False
@@ -80,10 +82,6 @@ class LifeConfig:
 	frameskip:     int = 1
 	num_procs:    int  = 8
 
-#cfg.fb_width, cfg.fb_height = (3840, 2160)
-#cfg.fb_width, cfg.fb_height = (3024, 1890-2-64)
-#cfg.fb_width, cfg.fb_height = (1920, 1080)
-#cfg.fb_width, cfg.fb_height = (128, 64)
 
 # return all remaining items in a queue
 def queue_purge(queue: Queue):
@@ -179,7 +177,7 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 
 			packed_pipe.send_bytes(packed_state[-WIDTH_PADDING//2::-1] if INDEX4LSB_WORKAROUND else packed_state)
 
-	except KeyboardInterrupt:
+	except KeyboardInterrupt: # this should only happen if the user pressed Ctrl+C
 		print("life_thread SIGINT")
 		while True:
 			packed_pipe.send_bytes(bytes(STATE_BYTE_LENGTH)) # unblock any readers, until we get killed
@@ -243,43 +241,54 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 		blitted_queues.reverse()
 		textures.reverse()
 
-	prev_times = [time.time()]*200
+	prev_times = [time.time()]*60
 	prev_time_i = 0
 	running = True
-	while running:
-		e = sdl2.SDL_Event()
-		while sdl2.SDL_PollEvent(e):
-			if e.type == sdl2.SDL_QUIT:
-				running = False
-				break
-			if e.type == sdl2.SDL_KEYDOWN:
-				if e.key.keysym.sym == sdl2.SDLK_ESCAPE:
+	try:
+		while running:
+			e = sdl2.SDL_Event()
+			while sdl2.SDL_PollEvent(e):
+				if e.type == sdl2.SDL_QUIT:
 					running = False
-					break
-		
-		y = 0
-		for surface_queue, texture in zip(blitted_queues, textures):
-			surface = surface_queue.get()
-			sdl2.SDL_UpdateTexture(texture, None, surface.contents.pixels, surface.contents.pitch)
-			h = surface.contents.h
-			sdl2.SDL_FreeSurface(surface)
-			sdl2.SDL_RenderCopy(renderer, texture, None, sdl2.SDL_Rect(0, y, cfg.fb_width, h))
-			y += h
+				if e.type == sdl2.SDL_KEYDOWN:
+					if e.key.keysym.sym == sdl2.SDLK_ESCAPE:
+						running = False
+					if e.key.keysym.sym == sdl2.SDLK_q:
+						running = False
+			if not running:
+				break
+			
+			y = 0
+			for surface_queue, texture in zip(blitted_queues, textures):
+				surface = surface_queue.get()
+				sdl2.SDL_UpdateTexture(
+					texture, None,
+					surface.contents.pixels,
+					surface.contents.pitch
+				)
+				h = surface.contents.h
+				sdl2.SDL_FreeSurface(surface)
+				sdl2.SDL_RenderCopy(
+					renderer, texture, None,
+					sdl2.SDL_Rect(0, y, cfg.fb_width, h)
+				)
+				y += h
 
-		sdl2.SDL_RenderPresent(renderer)
+			sdl2.SDL_RenderPresent(renderer)
 
-		now = time.time()
-		fps = len(prev_times)/(now-prev_times[prev_time_i])
-		msg = f"{fps:.1f}fps ({fps*cfg.frameskip:.1f}tps)"
-		#print(msg)
-		sdl2.SDL_SetWindowTitle(window, (f"pyswargol - {cfg.fb_width}x{cfg.fb_height} - " + msg).encode())
-		prev_times[prev_time_i] = now
-		prev_time_i = (prev_time_i + 1) % len(prev_times)
+			now = time.time()
+			fps = len(prev_times)/(now-prev_times[prev_time_i % len(prev_times)])
+			msg = f"{round(fps)}fps ({round(fps*cfg.frameskip)}tps)" if prev_time_i > len(prev_times) else "??fps (??tps)"
+			sdl2.SDL_SetWindowTitle(window, (f"pyswargol - {cfg.fb_width}x{cfg.fb_height} - " + msg).encode())
+			prev_times[prev_time_i % len(prev_times)] = now
+			prev_time_i += 1
 
-	sdl2.SDL_DestroyTexture(texture)
-	sdl2.SDL_DestroyRenderer(renderer)
-	sdl2.SDL_DestroyWindow(window)
-	sdl2.SDL_Quit()
+	finally:
+		for texture in textures:
+			sdl2.SDL_DestroyTexture(texture)
+		sdl2.SDL_DestroyRenderer(renderer)
+		sdl2.SDL_DestroyWindow(window)
+		sdl2.SDL_Quit()
 
 
 def main(cfg: LifeConfig):
@@ -297,7 +306,7 @@ def main(cfg: LifeConfig):
 
 	# vertically split the framebuffer into close-to-equal sized chunks
 	baseheight, rem = divmod(cfg.fb_height, cfg.num_procs)
-	section_heights = [baseheight] * (cfg.num_procs - rem) + [baseheight+1] * rem
+	section_heights = [baseheight] * (cfg.num_procs - rem) + [baseheight + 1] * rem
 	assert(sum(section_heights) == cfg.fb_height)
 
 	blitted_queues = [Queue(1) for _ in range(cfg.num_procs)]
