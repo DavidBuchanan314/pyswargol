@@ -59,6 +59,10 @@ INDEX4LSB_WORKAROUND = True
 WIDTH_PADDING = 16
 GLIDER_TEST = False
 
+# RGBA
+COLOUR_OFF = (40,  40,  40,  255)
+COLOUR_ON  = (255, 255, 255, 255)
+
 
 @dataclass(kw_only=True)
 class LifeConfig:
@@ -191,8 +195,8 @@ def blit_thread(cfg: LifeConfig, i: int, section_height :int, stopped: Event, pa
 			(cfg.fb_width + WIDTH_PADDING) // 2, # pitch
 			sdl2.SDL_PIXELFORMAT_INDEX4MSB if INDEX4LSB_WORKAROUND else sdl2.SDL_PIXELFORMAT_INDEX4LSB
 		)
-		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(40, 40, 40, 255), 0, 1)
-		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(255, 255, 255, 255), 1, 1)
+		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(*COLOUR_OFF), 0, 1)
+		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(*COLOUR_ON), 1, 1)
 		blitted_surface = sdl2.SDL_ConvertSurfaceFormat(surface, SURFACE_FMT, 0)
 		if not blitted_surface:
 			raise Exception("SDL_ConvertSurfaceFormat: " + sdl2.SDL_GetError().decode())
