@@ -195,7 +195,10 @@ def blit_thread(cfg: LifeConfig, i: int, section_height :int, stopped: Event, pa
 		)
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(40, 40, 40, 255), 0, 1)
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(255, 255, 255, 255), 1, 1)
-		blitted_queue.put(sdl2.SDL_ConvertSurfaceFormat(surface, SURFACE_FMT, 0))
+		blitted_surface = sdl2.SDL_ConvertSurfaceFormat(surface, SURFACE_FMT, 0)
+		if not blitted_surface:
+			raise Exception("SDL_ConvertSurfaceFormat: " + sdl2.SDL_GetError().decode())
+		blitted_queue.put(blitted_surface)
 		sdl2.SDL_FreeSurface(surface)
 	
 	print(f"blit_thread {i}: graceful exit")
