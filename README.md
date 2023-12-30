@@ -7,8 +7,8 @@ Usage: swargol.py [OPTIONS]
 Render Conway's Game of Life via SDL2, unreasonably quickly.
 
 Options:
-  --fb-width=INT    framebuffer width (default: 1280)
-  --fb-height=INT   framebuffer height (default: 720)
+  --width=INT       framebuffer width (default: 1280)
+  --height=INT      framebuffer height (default: 720)
   --vsync=BOOL      enable vsync (default: True)
   --fullscreen      enable fullscreen
   --drylife=BOOL    use the non-standard "drylife" algorithm (default: True)

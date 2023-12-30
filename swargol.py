@@ -69,8 +69,8 @@ class LifeConfig:
 	"""
 	Render Conway's Game of Life via SDL2, unreasonably quickly.
 
-	:param fb_width: framebuffer width
-	:param fb_height: framebuffer height
+	:param width: framebuffer width
+	:param height: framebuffer height
 	:param vsync: enable vsync
 	:param fullscreen: enable fullscreen
 	:param drylife: use the non-standard "drylife" algorithm
@@ -78,8 +78,8 @@ class LifeConfig:
 	:param num_procs: degree of parallelism (NB: number of actual threads will be 2n+1)
 	""" # this docstring is used by clize
 
-	fb_width:      int = 1280
-	fb_height:     int = 720
+	width:        int = 1280
+	height:       int = 720
 	vsync:        bool = True
 	fullscreen:   bool = False
 	drylife:      bool = True
@@ -190,9 +190,9 @@ def blit_thread(cfg: LifeConfig, i: int, section_height :int, stopped: Event, pa
 		packed_frame = packed_queue.recv_bytes() # this needs to stay in scope until SDL_ConvertSurfaceFormat is complete!
 		surface = sdl2.SDL_CreateRGBSurfaceWithFormatFrom(
 			packed_frame,
-			cfg.fb_width, section_height,
+			cfg.width, section_height,
 			4, # bit-depth
-			(cfg.fb_width + WIDTH_PADDING) // 2, # pitch
+			(cfg.width + WIDTH_PADDING) // 2, # pitch
 			sdl2.SDL_PIXELFORMAT_INDEX4MSB if INDEX4LSB_WORKAROUND else sdl2.SDL_PIXELFORMAT_INDEX4LSB
 		)
 		sdl2.SDL_SetPaletteColors(surface.contents.format.contents.palette, sdl2.SDL_Color(*COLOUR_OFF), 0, 1)
@@ -212,7 +212,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 	window = sdl2.SDL_CreateWindow(
 		b"pysdl2 framebuffer test",
 		sdl2.SDL_WINDOWPOS_UNDEFINED, sdl2.SDL_WINDOWPOS_UNDEFINED,
-		cfg.fb_width, cfg.fb_height,
+		cfg.width, cfg.height,
 		sdl2.SDL_WINDOW_SHOWN
 	)
 
@@ -234,7 +234,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 			renderer,
 			SURFACE_FMT,
 			sdl2.SDL_TEXTUREACCESS_STREAMING,
-			cfg.fb_width, h
+			cfg.width, h
 		)
 
 		if not texture:
@@ -275,7 +275,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 				sdl2.SDL_FreeSurface(surface)
 				sdl2.SDL_RenderCopy(
 					renderer, texture, None,
-					sdl2.SDL_Rect(0, y, cfg.fb_width, h)
+					sdl2.SDL_Rect(0, y, cfg.width, h)
 				)
 				y += h
 
@@ -284,7 +284,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 			now = time.time()
 			fps = len(prev_times)/(now-prev_times[prev_time_i % len(prev_times)])
 			msg = f"{round(fps)}fps ({round(fps*cfg.frameskip)}tps)" if prev_time_i > len(prev_times) else "??fps (??tps)"
-			sdl2.SDL_SetWindowTitle(window, (f"pyswargol - {cfg.fb_width}x{cfg.fb_height} - " + msg).encode())
+			sdl2.SDL_SetWindowTitle(window, (f"pyswargol - {cfg.width}x{cfg.height} - " + msg).encode())
 			prev_times[prev_time_i % len(prev_times)] = now
 			prev_time_i += 1
 
@@ -305,21 +305,21 @@ def main(cfg: LifeConfig):
 		dm = sdl2.SDL_DisplayMode()
 		sdl2.SDL_GetDesktopDisplayMode(0, dm)
 		print(f"Overriding fb size to match fullscreen resolution: {dm.w}x{dm.h}")
-		cfg.fb_width, cfg.fb_height = dm.w, dm.h
+		cfg.width, cfg.height = dm.w, dm.h
 
 	stopped = Event()
 
 	# vertically split the framebuffer into close-to-equal sized chunks
-	baseheight, rem = divmod(cfg.fb_height, cfg.num_procs)
+	baseheight, rem = divmod(cfg.height, cfg.num_procs)
 	section_heights = [baseheight] * (cfg.num_procs - rem) + [baseheight + 1] * rem
-	assert(sum(section_heights) == cfg.fb_height)
+	assert(sum(section_heights) == cfg.height)
 
 	blitted_queues = [Queue(1) for _ in range(cfg.num_procs)]
 
 	wraparound_pipes = [Pipe() for _ in range(cfg.num_procs)]
 	packed_result_pipes = [Pipe(duplex=False) for _ in range(cfg.num_procs)]
 	life_procs = [
-		Process(target=life_thread, args=[cfg, i, cfg.fb_width, h, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
+		Process(target=life_thread, args=[cfg, i, cfg.width, h, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
 		for i, h in enumerate(section_heights)
 	]
 	for proc in life_procs:
