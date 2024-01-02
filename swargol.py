@@ -74,16 +74,18 @@ class LifeConfig:
 	:param vsync: enable vsync
 	:param fullscreen: enable fullscreen
 	:param drylife: use the non-standard "drylife" algorithm
+	:param slow: use the very slow implementation (for benchmark comparisons)
 	:param frameskip: only render 1-in-n frames to the screen
 	:param num_procs: degree of parallelism (NB: number of actual threads will be 2n+1)
 	""" # this docstring is used by clize
 
-	width:        int = 1280
-	height:       int = 720
+	width:        int  = 1280
+	height:       int  = 720
 	vsync:        bool = True
 	fullscreen:   bool = False
 	drylife:      bool = True
-	frameskip:     int = 1
+	slow:         bool = False
+	frameskip:    int  = 1
 	num_procs:    int  = 8
 
 
@@ -96,7 +98,53 @@ def queue_purge(queue: Queue):
 		pass
 
 
+# This is the de-optimised version of the `life_thread` function
+# It exists solely for reference purposes, and performance comparisons
+def life_thread_naive(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_bottom):
+	assert(width % 2 == 0)
+	width += WIDTH_PADDING
+	# 4 bits per cell, to match the buffer format of the optimised version
+	state = bytearray((width * (height + 2)) // 2) # an extra row on top and bottom to handle wraparound
+	next_state = bytearray(len(state))
+
+	state[width//2:-width//2] = [x & 0x11 for x in os.urandom((width * height) // 2)]
+
+	def get_cell(state, x, y):
+		bit_idx = (y * width + x) * 4
+		return (state[bit_idx // 8] >> (bit_idx % 8)) & 1
+	
+	def set_cell(state, x, y, val):
+		bit_idx = (y * width + x) * 4
+		state[bit_idx // 8] = (state[bit_idx // 8] & ~(1 << (bit_idx % 8))) | (val << (bit_idx % 8))
+	
+	while True:
+		pipe_top.send_bytes(state[width//2:width])
+		pipe_bottom.send_bytes(state[-width:-width//2])
+		state[:width//2] = pipe_top.recv_bytes()
+		state[-width//2:] = pipe_bottom.recv_bytes()
+
+		for y in range(1, height + 1):
+			for x in range(width):
+				neighbor_count = sum(
+					get_cell(state, (x + dx) % width, y + dy)
+					for dy, dx in [
+						(-1, -1), (0, -1), (1, -1),
+						(-1,  0),          (1,  0),
+						(-1,  1), (0,  1), (1,  1)
+					]
+				)
+				this_cell = get_cell(state, x, y)
+				next_value = neighbor_count == 3 or (this_cell and neighbor_count == 2)
+				set_cell(next_state, x, y, next_value)
+
+		state, next_state = next_state, state # swap buffers
+
+		packed_state = state[width//2:-width//2]
+		packed_pipe.send_bytes(packed_state[::-1] if INDEX4LSB_WORKAROUND else packed_state)
+
+
 def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_bottom):
+	assert(width % 2 == 0)
 	STRIDE = width + WIDTH_PADDING
 	STATE_BYTE_LENGTH = (STRIDE * height) // 2
 	COLSHIFT = STRIDE * 4
@@ -319,7 +367,7 @@ def main(cfg: LifeConfig):
 	wraparound_pipes = [Pipe() for _ in range(cfg.num_procs)]
 	packed_result_pipes = [Pipe(duplex=False) for _ in range(cfg.num_procs)]
 	life_procs = [
-		Process(target=life_thread, args=[cfg, i, cfg.width, h, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
+		Process(target=life_thread_naive if cfg.slow else life_thread, args=[cfg, i, cfg.width, h, packed_result_pipes[i][1], wraparound_pipes[i][0], wraparound_pipes[(i+1)%cfg.num_procs][1]])
 		for i, h in enumerate(section_heights)
 	]
 	for proc in life_procs:
