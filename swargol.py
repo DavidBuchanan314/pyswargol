@@ -77,6 +77,7 @@ class LifeConfig:
 	:param slow: use the very slow implementation (for benchmark comparisons)
 	:param frameskip: only render 1-in-n frames to the screen
 	:param num_procs: degree of parallelism (NB: number of actual threads will be 2n+1)
+	:param bench_frames: render a certain number of frames and then exit
 	""" # this docstring is used by clize
 
 	width:        int  = 1280
@@ -87,6 +88,7 @@ class LifeConfig:
 	slow:         bool = False
 	frameskip:    int  = 1
 	num_procs:    int  = 8
+	bench_frames: int  = 0
 
 
 # return all remaining items in a queue
@@ -127,7 +129,7 @@ def life_thread_naive(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, 
 			for x in range(width):
 				neighbor_count = sum(
 					get_cell(state, (x + dx) % width, y + dy)
-					for dy, dx in [
+					for dx, dy in [
 						(-1, -1), (0, -1), (1, -1),
 						(-1,  0),          (1,  0),
 						(-1,  1), (0,  1), (1,  1)
@@ -135,6 +137,8 @@ def life_thread_naive(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, 
 				)
 				this_cell = get_cell(state, x, y)
 				next_value = neighbor_count == 3 or (this_cell and neighbor_count == 2)
+				if cfg.drylife: # another opportunity for dead cells to come alive
+					next_value |= (not this_cell) and neighbor_count == 7
 				set_cell(next_state, x, y, next_value)
 
 		state, next_state = next_state, state # swap buffers
@@ -208,14 +212,11 @@ def life_thread(cfg: LifeConfig, i, width, height, packed_pipe, pipe_top, pipe_b
 				has_7_neighbors &= has_7_neighbors >> 2  # fold in half
 				has_7_neighbors &= has_7_neighbors >> 1  # fold in half again
 				
-				# variable names here are misleading...
-				has_7_neighbors &= ~state
-				has_3_neighbors |= has_7_neighbors
+				# variable name here is misleading...
+				has_3_neighbors |= (~state) & has_7_neighbors
 
 			# apply game-of-life rules
-			state &= has_4_neighbors
-			state |= has_3_neighbors
-			state &= MASK_CANVAS
+			state = (has_3_neighbors | (state & has_4_neighbors)) & MASK_CANVAS
 
 			packed_state = (state>>BIAS).to_bytes(STATE_BYTE_LENGTH, "little")
 			pipe_top.send_bytes(packed_state[:STRIDE//2+1])
@@ -295,7 +296,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 		textures.reverse()
 
 	prev_times = [time.time()]*60
-	prev_time_i = 0
+	frame_ctr = 0
 	running = True
 	try:
 		while running:
@@ -330,11 +331,14 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 			sdl2.SDL_RenderPresent(renderer)
 
 			now = time.time()
-			fps = len(prev_times)/(now-prev_times[prev_time_i % len(prev_times)])
-			msg = f"{round(fps)}fps ({round(fps*cfg.frameskip)}tps)" if prev_time_i > len(prev_times) else "??fps (??tps)"
+			fps = len(prev_times)/(now-prev_times[frame_ctr % len(prev_times)])
+			msg = f"{round(fps)}fps ({round(fps*cfg.frameskip)}tps)" if frame_ctr > len(prev_times) else "??fps (??tps)"
 			sdl2.SDL_SetWindowTitle(window, (f"pyswargol - {cfg.width}x{cfg.height} - " + msg).encode())
-			prev_times[prev_time_i % len(prev_times)] = now
-			prev_time_i += 1
+			prev_times[frame_ctr % len(prev_times)] = now
+			frame_ctr += 1
+
+			if cfg.bench_frames and frame_ctr > cfg.bench_frames:
+				break
 
 	finally:
 		for texture in textures:
