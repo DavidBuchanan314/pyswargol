@@ -21,4 +21,6 @@ Other actions:
   -h, --help           Show the help
 ```
 
+I've written [an article](https://www.da.vidbuchanan.co.uk/blog/python-swar.html) explaining more about how and why this code works.
+
 ![image](https://github.com/DavidBuchanan314/pyswargol/assets/13520633/217eaf38-d8b6-43ef-a37a-98a229dcae31)
