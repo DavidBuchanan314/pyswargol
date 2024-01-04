@@ -259,7 +259,7 @@ def blit_thread(cfg: LifeConfig, i: int, section_height :int, stopped: Event, pa
 
 def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List[Queue]):
 	window = sdl2.SDL_CreateWindow(
-		b"pysdl2 framebuffer test",
+		b"pyswargol",
 		sdl2.SDL_WINDOWPOS_UNDEFINED, sdl2.SDL_WINDOWPOS_UNDEFINED,
 		cfg.width, cfg.height,
 		sdl2.SDL_WINDOW_SHOWN
@@ -338,7 +338,7 @@ def gui_thread(cfg: LifeConfig, section_heights: List[int], blitted_queues: List
 			frame_ctr += 1
 
 			if cfg.bench_frames and frame_ctr > cfg.bench_frames:
-				break
+				os._exit(0) # exit immediately, don't waste time cleaning up
 
 	finally:
 		for texture in textures:
